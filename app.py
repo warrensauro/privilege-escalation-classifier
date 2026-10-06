@@ -44,8 +44,8 @@ st.set_page_config(
     layout="wide",
 )
 
+
 def add_features(frame: pd.DataFrame) -> pd.DataFrame:
-    """Feature engineering identical to the notebook (section 3)."""
     out = frame.copy()
     out["text"] = (out["command"] + " " + out["description"]).str.strip()
     out["command_len"] = out["command"].str.len()
@@ -55,7 +55,6 @@ def add_features(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    """Cleaning steps from the notebook (section 2)."""
     clean = df.drop_duplicates().copy()
     for col in TEXT_COLUMNS:
         if col in clean.columns:
@@ -76,7 +75,6 @@ def read_csv_path(path: str) -> pd.DataFrame:
 
 
 def build_pipeline(n_estimators: int, random_state: int) -> Pipeline:
-    """ColumnTransformer + RandomForest pipeline (sections 5 and 6)."""
     preprocessor = ColumnTransformer(
         transformers=[
             ("categorical", OneHotEncoder(handle_unknown="ignore"),
@@ -100,10 +98,22 @@ def build_pipeline(n_estimators: int, random_state: int) -> Pipeline:
     )
 
 
+def make_report(y_true, y_pred) -> pd.DataFrame:
+    rep = pd.DataFrame(
+        classification_report(
+            y_true, y_pred, labels=SEVERITY_ORDER,
+            zero_division=0, output_dict=True,
+        )
+    ).T
+    rep.loc["accuracy", "support"] = len(y_true)
+    rep[["precision", "recall", "f1-score"]] = rep[["precision", "recall", "f1-score"]].round(3)
+    rep["support"] = rep["support"].round(0).astype(int)
+    return rep
+
+
 @st.cache_resource(show_spinner=False)
 def train_model(clean_df: pd.DataFrame, n_estimators: int,
                 test_size: float, random_state: int):
-    """Train/test split (stratified), fit, and evaluate (sections 4, 6, 7, 8)."""
     X = clean_df[FEATURE_COLUMNS]
     y = clean_df["severity"]
     X_train, X_test, y_train, y_test = train_test_split(
@@ -120,12 +130,7 @@ def train_model(clean_df: pd.DataFrame, n_estimators: int,
         "Macro Recall": recall_score(y_test, y_pred, average="macro", zero_division=0),
         "Macro F1": f1_score(y_test, y_pred, average="macro", zero_division=0),
     }
-    report = pd.DataFrame(
-        classification_report(
-            y_test, y_pred, labels=SEVERITY_ORDER,
-            zero_division=0, output_dict=True,
-        )
-    ).T
+    report = make_report(y_test, y_pred)
     cm = confusion_matrix(y_test, y_pred, labels=SEVERITY_ORDER)
 
     names = model.named_steps["preprocessor"].get_feature_names_out()
@@ -150,7 +155,6 @@ def train_model(clean_df: pd.DataFrame, n_estimators: int,
 
 
 def predict_records(model: Pipeline, records: pd.DataFrame) -> pd.DataFrame:
-    """Predict severity + class probabilities for raw records (text only)."""
     feats = add_features(records)[FEATURE_COLUMNS]
     preds = model.predict(feats)
     proba = pd.DataFrame(
@@ -165,6 +169,58 @@ def predict_records(model: Pipeline, records: pd.DataFrame) -> pd.DataFrame:
     for sev in SEVERITY_ORDER:
         result[f"p_{sev}"] = proba[sev].round(4)
     return result
+
+
+def show_evaluation(y_true: pd.Series, y_pred: pd.Series, platform=None):
+    y_true = y_true.reset_index(drop=True)
+    y_pred = y_pred.reset_index(drop=True)
+
+    st.markdown("### Overall evaluation")
+    cols = st.columns(4)
+    cols[0].metric("Accuracy", f"{accuracy_score(y_true, y_pred):.2%}")
+    cols[1].metric("Macro Precision", f"{precision_score(y_true, y_pred, average='macro', labels=SEVERITY_ORDER, zero_division=0):.2%}")
+    cols[2].metric("Macro Recall", f"{recall_score(y_true, y_pred, average='macro', labels=SEVERITY_ORDER, zero_division=0):.2%}")
+    cols[3].metric("Macro F1", f"{f1_score(y_true, y_pred, average='macro', labels=SEVERITY_ORDER, zero_division=0):.2%}")
+
+    counts = y_true.value_counts()
+    small = [s for s in SEVERITY_ORDER if counts.get(s, 0) < 10]
+    if small:
+        st.warning(
+            "Classes with fewer than 10 true records: "
+            + ", ".join(f"{s} ({int(counts.get(s, 0))})" for s in small)
+            + ". Their scores (and the macro averages) are unreliable."
+        )
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Classification report**")
+        st.dataframe(make_report(y_true, y_pred), width="stretch")
+        st.markdown("**Actual vs predicted counts**")
+        dist = pd.DataFrame({
+            "Actual": y_true.value_counts().reindex(SEVERITY_ORDER).fillna(0).astype(int),
+            "Predicted": y_pred.value_counts().reindex(SEVERITY_ORDER).fillna(0).astype(int),
+        })
+        st.dataframe(dist, width="stretch")
+    with right:
+        st.markdown("**Confusion matrix**")
+        cm = confusion_matrix(y_true, y_pred, labels=SEVERITY_ORDER)
+        fig, ax = plt.subplots(figsize=(5, 4.2))
+        ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=SEVERITY_ORDER).plot(
+            ax=ax, cmap="Blues", colorbar=False
+        )
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+    if platform is not None and platform.nunique() > 1:
+        st.markdown("**Accuracy by platform**")
+        plat = pd.DataFrame({"platform": platform.reset_index(drop=True),
+                             "correct": (y_true == y_pred)})
+        st.dataframe(
+            plat.groupby("platform")["correct"].agg(accuracy="mean", records="size"),
+            width="stretch",
+        )
+
 
 st.sidebar.title("🛡️ Settings")
 st.sidebar.subheader("1. Dataset")
@@ -190,6 +246,7 @@ st.sidebar.caption(
     "Defensive analytics only. Dataset commands are processed as text and "
     "are never executed."
 )
+
 
 st.title("Privilege Escalation Risk Classifier")
 st.markdown(
@@ -223,6 +280,7 @@ model = result["model"]
 tab_data, tab_eval, tab_predict, tab_batch, tab_imp = st.tabs(
     ["📊 Data", "📈 Evaluation", "🔎 Predict", "📁 Batch Predict", "⭐ Feature Importance"]
 )
+
 
 with tab_data:
     c1, c2, c3, c4 = st.columns(4)
@@ -273,6 +331,7 @@ with tab_data:
     st.dataframe(view[show_cols], width="stretch", height=350)
     st.caption(f"Showing {len(view):,} of {len(clean_df):,} records (text only; nothing is executed).")
 
+
 with tab_eval:
     st.caption(
         f"Stratified split • {result['n_train']:,} training / {result['n_test']:,} "
@@ -285,10 +344,7 @@ with tab_eval:
     left, right = st.columns(2)
     with left:
         st.subheader("Classification report")
-        rep = result["report"].copy()
-        rep[["precision", "recall", "f1-score"]] = rep[["precision", "recall", "f1-score"]].round(3)
-        rep["support"] = rep["support"].round(0).astype(int)
-        st.dataframe(rep, width="stretch")
+        st.dataframe(result["report"], width="stretch")
     with right:
         st.subheader("Confusion matrix")
         fig, ax = plt.subplots(figsize=(5, 4.2))
@@ -304,6 +360,7 @@ with tab_eval:
         "Results describe performance on this held-out split only and should "
         "not be taken as proof of performance on new, external datasets."
     )
+
 
 with tab_predict:
     st.subheader("Classify a technique")
@@ -364,6 +421,7 @@ with tab_predict:
             st.write(f"**Actual:** {s['severity']}  →  **Predicted:** {pred['predicted_severity']} "
                      f"({pred['confidence']:.1%})")
 
+
 with tab_batch:
     st.subheader("Batch prediction from CSV")
     st.caption("Required columns: platform, category, command, description.")
@@ -378,8 +436,29 @@ with tab_batch:
             bdf = bdf.copy()
             for c in need:
                 bdf[c] = bdf[c].fillna("").astype(str).str.strip()
+            has_labels = "severity" in bdf.columns
+            if has_labels:
+                bdf["severity"] = bdf["severity"].fillna("").astype(str).str.strip()
             scored = predict_records(model, bdf)
             st.success(f"Classified {len(scored):,} records.")
+
+            if has_labels:
+                labelled = scored[scored["severity"].isin(SEVERITY_ORDER)]
+                skipped = len(scored) - len(labelled)
+                if labelled.empty:
+                    st.warning("The 'severity' column has no valid labels "
+                               "(Critical, High, Medium, Low), so no evaluation was run.")
+                else:
+                    if skipped:
+                        st.caption(f"{skipped:,} rows without a valid severity label were left out of the evaluation.")
+                    show_evaluation(
+                        labelled["severity"], labelled["predicted_severity"],
+                        platform=labelled["platform"],
+                    )
+            else:
+                st.info("Add a 'severity' column to your CSV to also get an overall evaluation.")
+
+            st.markdown("### Predictions")
             st.bar_chart(scored["predicted_severity"].value_counts().reindex(SEVERITY_ORDER).fillna(0))
             st.dataframe(scored, width="stretch", height=350)
             st.download_button(
@@ -388,6 +467,7 @@ with tab_batch:
                 file_name="severity_predictions.csv",
                 mime="text/csv",
             )
+
 
 with tab_imp:
     st.subheader("Top Random Forest feature importances")
