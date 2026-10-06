@@ -1,13 +1,3 @@
-"""
-Privilege Escalation Risk Classifier - Streamlit GUI
-Converted from: Sentinels_Privilege_Escalation_ML_Colab.ipynb
-
-Defensive analytics only: commands in the dataset are treated strictly as text
-and are NEVER executed.
-
-Run with:  streamlit run app.py
-"""
-
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -54,10 +44,6 @@ st.set_page_config(
     layout="wide",
 )
 
-
-# ----------------------------------------------------------------------------
-# Data helpers
-# ----------------------------------------------------------------------------
 def add_features(frame: pd.DataFrame) -> pd.DataFrame:
     """Feature engineering identical to the notebook (section 3)."""
     out = frame.copy()
@@ -180,10 +166,6 @@ def predict_records(model: Pipeline, records: pd.DataFrame) -> pd.DataFrame:
         result[f"p_{sev}"] = proba[sev].round(4)
     return result
 
-
-# ----------------------------------------------------------------------------
-# Sidebar: data source + model settings
-# ----------------------------------------------------------------------------
 st.sidebar.title("🛡️ Settings")
 st.sidebar.subheader("1. Dataset")
 
@@ -209,9 +191,6 @@ st.sidebar.caption(
     "are never executed."
 )
 
-# ----------------------------------------------------------------------------
-# Header
-# ----------------------------------------------------------------------------
 st.title("Privilege Escalation Risk Classifier")
 st.markdown(
     "Random Forest multiclass classification of privilege-escalation "
@@ -245,9 +224,6 @@ tab_data, tab_eval, tab_predict, tab_batch, tab_imp = st.tabs(
     ["📊 Data", "📈 Evaluation", "🔎 Predict", "📁 Batch Predict", "⭐ Feature Importance"]
 )
 
-# ----------------------------------------------------------------------------
-# Tab: Data
-# ----------------------------------------------------------------------------
 with tab_data:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Records", f"{len(clean_df):,}")
@@ -297,9 +273,6 @@ with tab_data:
     st.dataframe(view[show_cols], width="stretch", height=350)
     st.caption(f"Showing {len(view):,} of {len(clean_df):,} records (text only; nothing is executed).")
 
-# ----------------------------------------------------------------------------
-# Tab: Evaluation
-# ----------------------------------------------------------------------------
 with tab_eval:
     st.caption(
         f"Stratified split • {result['n_train']:,} training / {result['n_test']:,} "
@@ -332,9 +305,6 @@ with tab_eval:
         "not be taken as proof of performance on new, external datasets."
     )
 
-# ----------------------------------------------------------------------------
-# Tab: Single prediction
-# ----------------------------------------------------------------------------
 with tab_predict:
     st.subheader("Classify a technique")
     st.caption("The command is analysed purely as text. It is never run.")
@@ -394,9 +364,6 @@ with tab_predict:
             st.write(f"**Actual:** {s['severity']}  →  **Predicted:** {pred['predicted_severity']} "
                      f"({pred['confidence']:.1%})")
 
-# ----------------------------------------------------------------------------
-# Tab: Batch prediction
-# ----------------------------------------------------------------------------
 with tab_batch:
     st.subheader("Batch prediction from CSV")
     st.caption("Required columns: platform, category, command, description.")
@@ -422,9 +389,6 @@ with tab_batch:
                 mime="text/csv",
             )
 
-# ----------------------------------------------------------------------------
-# Tab: Feature importance
-# ----------------------------------------------------------------------------
 with tab_imp:
     st.subheader("Top Random Forest feature importances")
     top_n = st.slider("Features to show", 5, 40, 20)
