@@ -133,20 +133,11 @@ def train_model(clean_df: pd.DataFrame, n_estimators: int,
     report = make_report(y_test, y_pred)
     cm = confusion_matrix(y_test, y_pred, labels=SEVERITY_ORDER)
 
-    names = model.named_steps["preprocessor"].get_feature_names_out()
-    importances = model.named_steps["classifier"].feature_importances_
-    importance_df = (
-        pd.DataFrame({"feature": names, "importance": importances})
-        .sort_values("importance", ascending=False)
-        .reset_index(drop=True)
-    )
-
     return {
         "model": model,
         "metrics": metrics,
         "report": report,
         "cm": cm,
-        "importance": importance_df,
         "n_train": len(X_train),
         "n_test": len(X_test),
         "y_train": y_train,
@@ -277,8 +268,8 @@ with st.spinner("Training Random Forest pipeline..."):
     result = train_model(clean_df, n_estimators, float(test_size), int(random_state))
 model = result["model"]
 
-tab_data, tab_eval, tab_predict, tab_batch, tab_imp = st.tabs(
-    ["📊 Data", "📈 Evaluation", "🔎 Predict", "📁 Batch Predict", "⭐ Feature Importance"]
+tab_data, tab_eval, tab_predict, tab_batch = st.tabs(
+    ["📊 Data", "📈 Evaluation", "🔎 Predict", "📁 Batch Predict"]
 )
 
 
@@ -467,20 +458,3 @@ with tab_batch:
                 file_name="severity_predictions.csv",
                 mime="text/csv",
             )
-
-
-with tab_imp:
-    st.subheader("Top Random Forest feature importances")
-    top_n = st.slider("Features to show", 5, 40, 20)
-    imp = result["importance"].head(top_n)
-    fig, ax = plt.subplots(figsize=(8, max(3, top_n * 0.28)))
-    ax.barh(imp["feature"][::-1], imp["importance"][::-1], color="#1f77b4")
-    ax.set_xlabel("Importance")
-    fig.tight_layout()
-    st.pyplot(fig)
-    plt.close(fig)
-    st.dataframe(imp, width="stretch")
-    st.caption(
-        "Text features are TF-IDF unigrams/bigrams, so individual words or "
-        "n-grams can appear among the most important features."
-    )
