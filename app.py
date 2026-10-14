@@ -44,10 +44,7 @@ TEXT_COLUMNS = [
     "severity", "mapped_technique", "reference",
 ]
 REQUIRED_COLUMNS = ["platform", "command", "description", "category", "severity"]
-FEATURE_COLUMNS = [
-    "platform", "category", "text",
-    "command_len", "description_len", "text_word_count",
-]
+FEATURE_COLUMNS = ["platform", "category", "text"]
 
 st.set_page_config(
     page_title="Privilege Escalation Risk Classifier",
@@ -59,9 +56,6 @@ st.set_page_config(
 def add_features(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     out["text"] = (out["command"] + " " + out["description"]).str.strip()
-    out["command_len"] = out["command"].str.len()
-    out["description_len"] = out["description"].str.len()
-    out["text_word_count"] = out["text"].str.split().str.len()
     return out
 
 
@@ -125,8 +119,6 @@ def build_pipeline(n_estimators: int, random_state: int) -> Pipeline:
              ["platform", "category"]),
             ("text", TfidfVectorizer(ngram_range=(1, 2), max_features=5000),
              "text"),
-            ("numeric", "passthrough",
-             ["command_len", "description_len", "text_word_count"]),
         ]
     )
     return Pipeline(
