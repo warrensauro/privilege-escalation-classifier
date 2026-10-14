@@ -20,7 +20,18 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
-DEFAULT_PATH = Path("priv_escalation_dataset.csv")
+DATASET_CANDIDATES = [
+    Path("priv_escalation_dataset_updated.csv"),
+    Path("priv_escalation_dataset.csv"),
+]
+N_ESTIMATORS = 300
+TEST_SIZE = 0.20
+RANDOM_STATE = 42
+ROBUST_TRAINING = True
+UNKNOWN_CATEGORY = "Unknown"
+AUTO_CATEGORY = "Auto-detect (unknown)"
+REVIEW_THRESHOLD = 0.20
+HIGH_RISK = {"Critical", "High"}
 SEVERITY_ORDER = ["Critical", "High", "Medium", "Low"]
 SEVERITY_COLORS = {
     "Critical": "#d62728",
@@ -52,6 +63,39 @@ def add_features(frame: pd.DataFrame) -> pd.DataFrame:
     out["description_len"] = out["description"].str.len()
     out["text_word_count"] = out["text"].str.split().str.len()
     return out
+
+
+def normalize_records(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    for col in ["platform", "command", "description", "category"]:
+        if col not in out.columns:
+            out[col] = ""
+        out[col] = out[col].fillna("").astype(str).str.strip()
+    out.loc[out["category"] == "", "category"] = UNKNOWN_CATEGORY
+    return out
+
+
+def no_category_view(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    out["category"] = UNKNOWN_CATEGORY
+    return add_features(out)
+
+
+def hidden_view(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    out["category"] = UNKNOWN_CATEGORY
+    out["description"] = ""
+    return add_features(out)
+
+
+def risk_rates(y_true, y_pred):
+    y_true = pd.Series(list(y_true))
+    y_pred = pd.Series(list(y_pred))
+    harmless = ~y_true.isin(HIGH_RISK)
+    threats = y_true.isin(HIGH_RISK)
+    false_alarms = (harmless & y_pred.isin(HIGH_RISK)).sum() / max(harmless.sum(), 1)
+    missed = (threats & ~y_pred.isin(HIGH_RISK)).sum() / max(threats.sum(), 1)
+    return float(false_alarms), float(missed)
 
 
 def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
@@ -113,16 +157,21 @@ def make_report(y_true, y_pred) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner=False)
 def train_model(clean_df: pd.DataFrame, n_estimators: int,
-                test_size: float, random_state: int):
-    X = clean_df[FEATURE_COLUMNS]
-    y = clean_df["severity"]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state, stratify=y
+                test_size: float, random_state: int, robust: bool):
+    train_df, test_df = train_test_split(
+        clean_df, test_size=test_size, random_state=random_state,
+        stratify=clean_df["severity"],
     )
+    parts = [train_df]
+    if robust:
+        parts += [no_category_view(train_df), hidden_view(train_df)]
+    train_aug = pd.concat(parts, ignore_index=True)
 
     model = build_pipeline(n_estimators, random_state)
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
+    model.fit(train_aug[FEATURE_COLUMNS], train_aug["severity"])
+
+    y_test = test_df["severity"]
+    y_pred = model.predict(test_df[FEATURE_COLUMNS])
 
     metrics = {
         "Accuracy": accuracy_score(y_test, y_pred),
@@ -133,32 +182,51 @@ def train_model(clean_df: pd.DataFrame, n_estimators: int,
     report = make_report(y_test, y_pred)
     cm = confusion_matrix(y_test, y_pred, labels=SEVERITY_ORDER)
 
+    stress_rows = []
+    views = [
+        ("Full records", test_df),
+        ("Command only (category and description hidden)", hidden_view(test_df)),
+    ]
+    for label, view in views:
+        pred = model.predict(view[FEATURE_COLUMNS])
+        false_alarms, missed = risk_rates(y_test, pred)
+        stress_rows.append({
+            "Test view": label,
+            "Accuracy": accuracy_score(y_test, pred),
+            "False alarms": false_alarms,
+            "Missed threats": missed,
+        })
+    stress = pd.DataFrame(stress_rows).set_index("Test view")
+
     return {
         "model": model,
         "metrics": metrics,
         "report": report,
         "cm": cm,
-        "n_train": len(X_train),
-        "n_test": len(X_test),
-        "y_train": y_train,
+        "stress": stress,
+        "n_train": len(train_df),
+        "n_test": len(test_df),
         "y_test": y_test,
     }
 
 
 def predict_records(model: Pipeline, records: pd.DataFrame) -> pd.DataFrame:
-    feats = add_features(records)[FEATURE_COLUMNS]
-    preds = model.predict(feats)
+    feats = add_features(normalize_records(records))[FEATURE_COLUMNS]
+    preds = pd.Series(model.predict(feats), index=records.index)
     proba = pd.DataFrame(
         model.predict_proba(feats),
         columns=model.named_steps["classifier"].classes_,
         index=records.index,
     )
     proba = proba.reindex(columns=SEVERITY_ORDER, fill_value=0.0)
+    high_risk_score = proba["Critical"] + proba["High"]
     result = records.copy()
     result["predicted_severity"] = preds
     result["confidence"] = proba.max(axis=1).round(4)
     for sev in SEVERITY_ORDER:
         result[f"p_{sev}"] = proba[sev].round(4)
+    result["high_risk_score"] = high_risk_score.round(4)
+    result["needs_review"] = (~preds.isin(HIGH_RISK)) & (high_risk_score >= REVIEW_THRESHOLD)
     return result
 
 
@@ -172,6 +240,11 @@ def show_evaluation(y_true: pd.Series, y_pred: pd.Series, platform=None):
     cols[1].metric("Macro Precision", f"{precision_score(y_true, y_pred, average='macro', labels=SEVERITY_ORDER, zero_division=0):.2%}")
     cols[2].metric("Macro Recall", f"{recall_score(y_true, y_pred, average='macro', labels=SEVERITY_ORDER, zero_division=0):.2%}")
     cols[3].metric("Macro F1", f"{f1_score(y_true, y_pred, average='macro', labels=SEVERITY_ORDER, zero_division=0):.2%}")
+
+    false_alarms, missed = risk_rates(y_true, y_pred)
+    risk_cols = st.columns(2)
+    risk_cols[0].metric("False alarms (Low/Medium rated High/Critical)", f"{false_alarms:.1%}")
+    risk_cols[1].metric("Missed threats (High/Critical rated Low/Medium)", f"{missed:.1%}")
 
     counts = y_true.value_counts()
     small = [s for s in SEVERITY_ORDER if counts.get(s, 0) < 10]
@@ -220,17 +293,23 @@ uploaded = st.sidebar.file_uploader("Upload dataset CSV", type=["csv"])
 
 raw_df = None
 source_label = ""
+default_path = next((p for p in DATASET_CANDIDATES if p.exists()), None)
 if uploaded is not None:
     raw_df = read_csv_bytes(uploaded.getvalue())
     source_label = f"Uploaded: {uploaded.name}"
-elif DEFAULT_PATH.exists():
-    raw_df = read_csv_path(str(DEFAULT_PATH))
-    source_label = f"Local file: {DEFAULT_PATH}"
+elif default_path is not None:
+    raw_df = read_csv_path(str(default_path))
+    source_label = f"Local file: {default_path}"
 
-st.sidebar.subheader("2. Model")
-n_estimators = st.sidebar.slider("Number of trees", 50, 600, 300, step=50)
-test_size = st.sidebar.slider("Test split", 0.10, 0.40, 0.20, step=0.05)
-random_state = st.sidebar.number_input("Random state", min_value=0, value=42, step=1)
+st.sidebar.subheader("2. Model (fixed)")
+st.sidebar.markdown(
+    f"- Trees: **{N_ESTIMATORS}**\n"
+    f"- Test split: **{TEST_SIZE:.0%}**\n"
+    f"- Random state: **{RANDOM_STATE}**\n"
+    f"- Class weight: **balanced**\n"
+    f"- TF-IDF: **1-2 grams, 5,000 features**\n"
+    f"- Robust training: **{'on' if ROBUST_TRAINING else 'off'}**"
+)
 
 st.sidebar.divider()
 st.sidebar.caption(
@@ -247,7 +326,7 @@ st.markdown(
 
 if raw_df is None:
     st.info(
-        "Upload `priv_escalation_dataset.csv` in the sidebar, or place it in "
+        "Upload `priv_escalation_dataset_updated.csv` in the sidebar, or place it in "
         "the same folder as this app, to get started."
     )
     st.stop()
@@ -265,7 +344,7 @@ if clean_df["severity"].nunique() < 2 or len(clean_df) < 50:
 st.caption(f"{source_label} • {len(raw_df):,} raw rows → {len(clean_df):,} after cleaning")
 
 with st.spinner("Training Random Forest pipeline..."):
-    result = train_model(clean_df, n_estimators, float(test_size), int(random_state))
+    result = train_model(clean_df, N_ESTIMATORS, TEST_SIZE, RANDOM_STATE, ROBUST_TRAINING)
 model = result["model"]
 
 tab_data, tab_eval, tab_predict, tab_batch = st.tabs(
@@ -326,7 +405,7 @@ with tab_data:
 with tab_eval:
     st.caption(
         f"Stratified split • {result['n_train']:,} training / {result['n_test']:,} "
-        f"test records • {n_estimators} trees • balanced class weights"
+        f"test records • {N_ESTIMATORS} trees • balanced class weights"
     )
     cols = st.columns(4)
     for col, (name, val) in zip(cols, result["metrics"].items()):
@@ -347,6 +426,14 @@ with tab_eval:
         st.pyplot(fig)
         plt.close(fig)
 
+    st.subheader("Safety check: command-only test")
+    st.caption(
+        "False alarms are Low/Medium records rated High/Critical. Missed threats "
+        "are High/Critical records rated Low/Medium. The command-only row hides "
+        "the category and description, which is how a typed command arrives."
+    )
+    st.dataframe(result["stress"].style.format("{:.1%}"), width="stretch")
+
     st.info(
         "Results describe performance on this held-out split only and should "
         "not be taken as proof of performance on new, external datasets."
@@ -359,11 +446,11 @@ with tab_predict:
 
     c1, c2 = st.columns(2)
     platform = c1.selectbox("Platform", sorted(clean_df["platform"].unique()))
-    cats = sorted(clean_df.loc[clean_df["platform"] == platform, "category"].unique())
-    category = c2.selectbox("Category", cats)
+    cats = [AUTO_CATEGORY] + sorted(clean_df.loc[clean_df["platform"] == platform, "category"].unique())
+    category = c2.selectbox("Category", cats, help="Leave on Auto-detect if you only have the command.")
     command = st.text_area("Command (text only)", height=80,
                            placeholder="e.g. R --no-save -e 'system(\"/bin/sh\")'")
-    description = st.text_area("Description", height=80,
+    description = st.text_area("Description (optional)", height=80,
                                placeholder="e.g. Abuse the 'R' binary (shell) in a sudo context")
 
     if st.button("Predict severity", type="primary"):
@@ -372,7 +459,7 @@ with tab_predict:
         else:
             rec = pd.DataFrame([{
                 "platform": platform,
-                "category": category,
+                "category": UNKNOWN_CATEGORY if category == AUTO_CATEGORY else category,
                 "command": command.strip(),
                 "description": description.strip(),
             }])
@@ -388,6 +475,11 @@ with tab_predict:
                 f"</div>",
                 unsafe_allow_html=True,
             )
+            if out["needs_review"]:
+                st.warning(
+                    f"Rated {sev}, but the High/Critical probability is "
+                    f"{out['high_risk_score']:.0%}. Treat this as needing manual review."
+                )
             probs = pd.Series({s: out[f"p_{s}"] for s in SEVERITY_ORDER})
             fig, ax = plt.subplots(figsize=(6, 2.6))
             ax.barh(probs.index[::-1], probs.values[::-1],
@@ -415,23 +507,27 @@ with tab_predict:
 
 with tab_batch:
     st.subheader("Batch prediction from CSV")
-    st.caption("Required columns: platform, category, command, description.")
+    st.caption("Required columns: platform, command. Optional: category, description, severity (adds an evaluation).")
     batch_file = st.file_uploader("Upload CSV to classify", type=["csv"], key="batch")
     if batch_file is not None:
         bdf = pd.read_csv(batch_file)
-        need = ["platform", "category", "command", "description"]
+        need = ["platform", "command"]
         miss = [c for c in need if c not in bdf.columns]
         if miss:
             st.error(f"Missing columns: {', '.join(miss)}")
         else:
-            bdf = bdf.copy()
-            for c in need:
-                bdf[c] = bdf[c].fillna("").astype(str).str.strip()
+            bdf = normalize_records(bdf)
             has_labels = "severity" in bdf.columns
             if has_labels:
                 bdf["severity"] = bdf["severity"].fillna("").astype(str).str.strip()
             scored = predict_records(model, bdf)
             st.success(f"Classified {len(scored):,} records.")
+            review_count = int(scored["needs_review"].sum())
+            if review_count:
+                st.warning(
+                    f"{review_count:,} rows were rated Low/Medium but show elevated "
+                    "High/Critical probability. They are marked needs_review in the table."
+                )
 
             if has_labels:
                 labelled = scored[scored["severity"].isin(SEVERITY_ORDER)]
