@@ -307,7 +307,6 @@ st.sidebar.markdown(
     f"- Test split: **{TEST_SIZE:.0%}**\n"
     f"- Random state: **{RANDOM_STATE}**\n"
     f"- Class weight: **balanced**\n"
-    f"- TF-IDF: **1-2 grams, 5,000 features**\n"
 )
 
 st.sidebar.divider()
