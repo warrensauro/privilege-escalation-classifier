@@ -299,8 +299,6 @@ st.sidebar.markdown(
     f"- Test split: **{TEST_SIZE:.0%}**\n"
     f"- Random state: **{RANDOM_STATE}**\n"
     f"- Class weight: **balanced**\n"
-    f"- Features: **platform, category, text (TF-IDF 1-2 grams, 5,000)**\n"
-    f"- Robust training: **{'on' if ROBUST_TRAINING else 'off'}**"
 )
 
 st.sidebar.divider()
